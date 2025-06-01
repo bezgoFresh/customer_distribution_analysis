@@ -1,0 +1,456 @@
+import tkinter as tk
+from tkinter import ttk, filedialog
+import pandas as pd
+import folium
+from folium.plugins import MarkerCluster, HeatMap
+from io import BytesIO
+from PIL import Image, ImageTk
+import webbrowser
+import os
+import math
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+# Constants
+EARTH_RADIUS_KM = 6371
+
+class CustomerMappingApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Customer Mapping Analysis Tool")
+        self.root.geometry("1200x800")
+        
+        # Data storage
+        self.customer_df = None
+        self.butcher_df = None
+        self.distance_df = None
+        
+        # Create tabs
+        self.tab_control = ttk.Notebook(root)
+        
+        # Customer Map Tab
+        self.tab_map = ttk.Frame(self.tab_control)
+        self.tab_control.add(self.tab_map, text='Customer Map')
+        
+        # Butcher Distance Tab
+        self.tab_distance = ttk.Frame(self.tab_control)
+        self.tab_control.add(self.tab_distance, text='Butcher Distances')
+        
+        # Insights Tab
+        self.tab_insights = ttk.Frame(self.tab_control)
+        self.tab_control.add(self.tab_insights, text='Customer Insights')
+        
+        self.tab_control.pack(expand=1, fill="both")
+        
+        # Initialize tabs
+        self.setup_map_tab()
+        self.setup_distance_tab()
+        self.setup_insights_tab()
+    
+    def setup_map_tab(self):
+        # Map Frame
+        map_frame = ttk.LabelFrame(self.tab_map, text="Customer Location Mapping")
+        map_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # Control Panel
+        control_frame = ttk.Frame(map_frame)
+        control_frame.pack(fill="x", pady=5)
+        
+        # Upload Customer Data Button
+        btn_upload_customers = ttk.Button(
+            control_frame, 
+            text="Upload Customer Data", 
+            command=self.load_customer_data
+        )
+        btn_upload_customers.pack(side="left", padx=5)
+        
+        # Upload Butcher Data Button
+        btn_upload_butchers = ttk.Button(
+            control_frame, 
+            text="Upload Butcher Data", 
+            command=self.load_butcher_data
+        )
+        btn_upload_butchers.pack(side="left", padx=5)
+        
+        # Export Map Button
+        btn_export_map = ttk.Button(
+            control_frame, 
+            text="Export Map as Image", 
+            command=self.export_map_image
+        )
+        btn_export_map.pack(side="left", padx=5)
+        
+        # Map Display
+        self.map_display = tk.Canvas(map_frame, bg="white")
+        self.map_display.pack(fill="both", expand=True)
+        
+        # Status Label
+        self.status_label = ttk.Label(map_frame, text="Upload customer data to begin")
+        self.status_label.pack(fill="x")
+    
+    def setup_distance_tab(self):
+        # Distance Analysis Frame
+        distance_frame = ttk.LabelFrame(self.tab_distance, text="Customer-Butcher Distance Analysis")
+        distance_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # Calculate Button
+        btn_calculate = ttk.Button(
+            distance_frame, 
+            text="Calculate Distances", 
+            command=self.calculate_distances
+        )
+        btn_calculate.pack(pady=5)
+        
+        # Export Button
+        btn_export_distances = ttk.Button(
+            distance_frame, 
+            text="Export Distance Matrix", 
+            command=self.export_distance_matrix
+        )
+        btn_export_distances.pack(pady=5)
+        
+        # Treeview for displaying distances
+        self.distance_tree = ttk.Treeview(distance_frame)
+        self.distance_tree.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        # Add scrollbars
+        y_scroll = ttk.Scrollbar(distance_frame, orient="vertical", command=self.distance_tree.yview)
+        y_scroll.pack(side="right", fill="y")
+        x_scroll = ttk.Scrollbar(distance_frame, orient="horizontal", command=self.distance_tree.xview)
+        x_scroll.pack(side="bottom", fill="x")
+        
+        self.distance_tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+    
+    def setup_insights_tab(self):
+        # Insights Frame
+        insights_frame = ttk.LabelFrame(self.tab_insights, text="Customer Base Insights")
+        insights_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # Generate Insights Button
+        btn_generate = ttk.Button(
+            insights_frame, 
+            text="Generate Insights", 
+            command=self.generate_insights
+        )
+        btn_generate.pack(pady=5)
+        
+        # Canvas for plots
+        self.insights_canvas = tk.Canvas(insights_frame, bg="white")
+        self.insights_canvas.pack(fill="both", expand=True)
+        
+        # Text widget for insights
+        self.insights_text = tk.Text(insights_frame, height=10)
+        self.insights_text.pack(fill="x", pady=5)
+    
+    def load_customer_data(self):
+        file_path = filedialog.askopenfilename(
+            title="Select Customer Data File",
+            filetypes=[("Excel files", "*.xlsx *.xls"), ("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+        
+        if file_path:
+            try:
+                if file_path.endswith('.csv'):
+                    self.customer_df = pd.read_csv(file_path)
+                else:
+                    self.customer_df = pd.read_excel(file_path)
+                
+                # Clean column names (remove spaces, make lowercase)
+                self.customer_df.columns = self.customer_df.columns.str.strip().str.lower()
+                
+                # Add numeric conversion and validation
+                self.customer_df['latitude'] = pd.to_numeric(self.customer_df['latitude'], errors='coerce')
+                self.customer_df['longitude'] = pd.to_numeric(self.customer_df['longitude'], errors='coerce')
+                
+                # Remove rows with invalid coordinates
+                initial_count = len(self.customer_df)
+                self.customer_df = self.customer_df.dropna(subset=['latitude', 'longitude'])
+                new_count = len(self.customer_df)
+                
+                # Check required columns after cleaning
+                required = ['customer id', 'latitude', 'longitude']
+                missing = [col for col in required if col not in self.customer_df.columns]
+                
+                if missing:
+                    self.status_label.config(text=f"Missing columns: {', '.join(missing)}")
+                elif new_count == 0:
+                    self.status_label.config(text="Error: No valid coordinate data found")
+                else:
+                    if initial_count != new_count:
+                        self.status_label.config(text=f"Loaded {new_count} valid records (removed {initial_count - new_count} invalid rows)")
+                    else:
+                        self.status_label.config(text=f"Loaded {len(self.customer_df)} customer records")
+                    self.plot_customer_map()
+                    
+            except Exception as e:
+                self.status_label.config(text=f"Error loading file: {str(e)}")
+    
+    def load_butcher_data(self):
+        file_path = filedialog.askopenfilename(
+            title="Select Butcher Data File",
+            filetypes=[("Excel files", "*.xlsx *.xls"), ("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+        
+        if file_path:
+            try:
+                if file_path.endswith('.csv'):
+                    self.butcher_df = pd.read_csv(file_path)
+                else:
+                    self.butcher_df = pd.read_excel(file_path)
+                
+                # Clean column names
+                self.butcher_df.columns = self.butcher_df.columns.str.strip().str.lower()
+                
+                # Check required columns
+                required = ['butcher id', 'butcher name', 'latitude', 'longitude']
+                missing = [col for col in required if col not in self.butcher_df.columns]
+                
+                if missing:
+                    self.status_label.config(text=f"Missing columns: {', '.join(missing)}")
+                else:
+                    self.status_label.config(text=f"Loaded {len(self.butcher_df)} butcher records")
+                    self.plot_customer_map()  # Update map with butchers
+                    
+            except Exception as e:
+                self.status_label.config(text=f"Error loading file: {str(e)}")
+    
+    def plot_customer_map(self):
+        if self.customer_df is None:
+            return
+            
+        # Create map centered on mean of customer locations
+        mean_lat = self.customer_df['latitude'].mean()
+        mean_lon = self.customer_df['longitude'].mean()
+        
+        self.current_map = folium.Map(
+            location=[mean_lat, mean_lon],
+            zoom_start=12,
+            tiles='OpenStreetMap'
+        )
+        
+        # Add customer markers with clustering
+        customer_cluster = MarkerCluster(name="Customers").add_to(self.current_map)
+        
+        for idx, row in self.customer_df.iterrows():
+            folium.Marker(
+                location=[row['latitude'], row['longitude']],
+                popup=f"Customer ID: {row['customer id']}",
+                icon=folium.Icon(color='blue', icon='user')
+            ).add_to(customer_cluster)
+        
+        # Add butcher markers if available
+        if self.butcher_df is not None:
+            butcher_cluster = MarkerCluster(name="Butchers").add_to(self.current_map)
+            
+            for idx, row in self.butcher_df.iterrows():
+                folium.Marker(
+                    location=[row['latitude'], row['longitude']],
+                    popup=f"Butcher: {row.get('butcher name', row['butcher id'])}",
+                    icon=folium.Icon(color='red', icon='cutlery')
+                ).add_to(butcher_cluster)
+        
+        # Add heatmap
+        heat_data = [[row['latitude'], row['longitude']] for idx, row in self.customer_df.iterrows()]
+        HeatMap(heat_data, name="Heatmap").add_to(self.current_map)
+        
+        # Add layer control
+        folium.LayerControl().add_to(self.current_map)
+        
+        # Save to temporary HTML and display
+        self.temp_html = "temp_map.html"
+        self.current_map.save(self.temp_html)
+        
+        # Display in browser (alternative would be to embed in Tkinter)
+        webbrowser.open('file://' + os.path.abspath(self.temp_html))
+        
+        self.status_label.config(text="Map generated and opened in browser")
+    
+    def calculate_distances(self):
+        if self.customer_df is None or self.butcher_df is None:
+            self.status_label.config(text="Please load both customer and butcher data first")
+            return
+            
+        try:
+            # Calculate haversine distances between all customers and butchers
+            distances = []
+            
+            for _, cust in self.customer_df.iterrows():
+                row = {'Customer ID': cust['customer id']}
+                
+                for _, butcher in self.butcher_df.iterrows():
+                    # Haversine formula
+                    lat1, lon1 = math.radians(cust['latitude']), math.radians(cust['longitude'])
+                    lat2, lon2 = math.radians(butcher['latitude']), math.radians(butcher['longitude'])
+                    
+                    dlat = lat2 - lat1
+                    dlon = lon2 - lon1
+                    
+                    a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
+                    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+                    
+                    distance_km = EARTH_RADIUS_KM * c
+                    
+                    butcher_name = butcher.get('butcher name', butcher['butcher id'])
+                    row[f"Dist to {butcher_name} (km)"] = round(distance_km, 2)
+                
+                distances.append(row)
+            
+            self.distance_df = pd.DataFrame(distances)
+            
+            # Display in Treeview
+            self.display_distance_matrix()
+            
+            self.status_label.config(text=f"Calculated distances for {len(self.customer_df)} customers")
+            
+        except Exception as e:
+            self.status_label.config(text=f"Error calculating distances: {str(e)}")
+    
+    def display_distance_matrix(self):
+        # Clear existing tree
+        for i in self.distance_tree.get_children():
+            self.distance_tree.delete(i)
+        
+        # Set up columns
+        columns = list(self.distance_df.columns)
+        self.distance_tree["columns"] = columns
+        self.distance_tree["show"] = "headings"
+        
+        # Add headers
+        for col in columns:
+            self.distance_tree.heading(col, text=col)
+            self.distance_tree.column(col, width=100)
+        
+        # Add data rows
+        for _, row in self.distance_df.iterrows():
+            self.distance_tree.insert("", "end", values=list(row))
+    
+    def export_distance_matrix(self):
+        if self.distance_df is None:
+            self.status_label.config(text="No distance data to export")
+            return
+            
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel files", "*.xlsx"), ("CSV files", "*.csv"), ("All files", "*.*")],
+            title="Save Distance Matrix As"
+        )
+        
+        if file_path:
+            try:
+                if file_path.endswith('.csv'):
+                    self.distance_df.to_csv(file_path, index=False)
+                else:
+                    self.distance_df.to_excel(file_path, index=False)
+                
+                self.status_label.config(text=f"Distance matrix saved to {file_path}")
+            except Exception as e:
+                self.status_label.config(text=f"Error saving file: {str(e)}")
+    
+    def export_map_image(self):
+        if not hasattr(self, 'current_map'):
+            self.status_label.config(text="No map to export")
+            return
+            
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".png",
+            filetypes=[("PNG files", "*.png"), ("JPEG files", "*.jpg"), ("All files", "*.*")],
+            title="Save Map Image As"
+        )
+        
+        if file_path:
+            try:
+                # Use selenium to capture the map (alternative methods could be used here)
+                from selenium import webdriver
+                from PIL import Image
+                import time
+                
+                options = webdriver.ChromeOptions()
+                options.add_argument('--headless')
+                options.add_argument('--disable-gpu')
+                options.add_argument('--window-size=1200,800')
+                
+                driver = webdriver.Chrome(options=options)
+                driver.get(f'file://{os.path.abspath(self.temp_html)}')
+                time.sleep(3)  # Wait for map to load
+                
+                driver.save_screenshot(file_path)
+                driver.quit()
+                
+                # Crop to map area
+                img = Image.open(file_path)
+                img = img.crop((100, 100, 1100, 700))  # Adjust as needed
+                img.save(file_path)
+                
+                self.status_label.config(text=f"Map image saved to {file_path}")
+                
+            except Exception as e:
+                self.status_label.config(text=f"Error saving image: {str(e)}. Make sure ChromeDriver is installed.")
+    
+    def generate_insights(self):
+        if self.customer_df is None:
+            self.status_label.config(text="No customer data to analyze")
+            return
+            
+        try:
+            # Clear previous content
+            self.insights_text.delete(1.0, tk.END)
+            self.insights_canvas.delete("all")
+            
+            # Basic statistics
+            num_customers = len(self.customer_df)
+            avg_lat = self.customer_df['latitude'].mean()
+            avg_lon = self.customer_df['longitude'].mean()
+            
+            # Density analysis
+            lat_range = self.customer_df['latitude'].max() - self.customer_df['latitude'].min()
+            lon_range = self.customer_df['longitude'].max() - self.customer_df['longitude'].min()
+            
+            insights = [
+                f"Customer Base Insights:",
+                f"Total customers: {num_customers}",
+                f"Geographic center: {avg_lat:.4f}°N, {avg_lon:.4f}°E",
+                f"Latitude range: {lat_range:.4f} degrees",
+                f"Longitude range: {lon_range:.4f} degrees",
+                "\nRecommendations:"
+            ]
+            
+            if lat_range > 0.1 or lon_range > 0.1:
+                insights.append("- Customer base is geographically dispersed")
+                insights.append("- Consider regional service centers or multiple butchers")
+            else:
+                insights.append("- Customer base is geographically concentrated")
+                insights.append("- Single service location may be sufficient")
+            
+            if self.butcher_df is not None:
+                insights.append(f"\nButcher Coverage Analysis:")
+                insights.append(f"Number of butchers: {len(self.butcher_df)}")
+                
+                if self.distance_df is not None:
+                    avg_distances = self.distance_df.drop('Customer ID', axis=1).mean()
+                    insights.append("\nAverage distances to butchers:")
+                    for butcher, dist in avg_distances.items():
+                        insights.append(f"- {butcher}: {dist:.2f} km")
+            
+            self.insights_text.insert(tk.END, "\n".join(insights))
+            
+            # Create a density plot
+            fig, ax = plt.subplots(figsize=(8, 4))
+            self.customer_df['latitude'].hist(ax=ax, bins=15, alpha=0.7)
+            ax.set_title('Customer Latitude Distribution')
+            ax.set_xlabel('Latitude')
+            ax.set_ylabel('Number of Customers')
+            
+            # Embed plot in Tkinter
+            canvas = FigureCanvasTkAgg(fig, master=self.insights_canvas)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill="both", expand=True)
+            
+            self.status_label.config(text="Customer insights generated")
+            
+        except Exception as e:
+            self.status_label.config(text=f"Error generating insights: {str(e)}")
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = CustomerMappingApp(root)
+    root.mainloop()
